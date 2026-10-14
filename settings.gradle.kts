@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Studio APK"
+rootProject.name = "My Application"
 
 include(":app")
