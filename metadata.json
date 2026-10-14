@@ -1,0 +1,8 @@
+{
+  "name": "Studio APK",
+  "description": "Compile Android projects into signed APKs directly from your device using cloud CI runners.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
