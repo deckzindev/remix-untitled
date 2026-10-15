@@ -48,13 +48,16 @@ data class AuthUiState(
 
 data class BuildUiState(
   val projectAnalysis: ZipAnalysisResult? = null,
+  val compatibilityAnalysis: com.example.engine.CompatibilityAnalysis? = null,
   val projectName: String = "",
   val buildVariant: String = "release",
+  val engineStrategy: String = "compatibility",
   val isAnalyzing: Boolean = false,
   val isBuilding: Boolean = false,
   val currentProgress: BuildStepProgress? = null,
   val statusMessage: String? = null,
-  val errorMessage: String? = null
+  val errorMessage: String? = null,
+  val missingRequiredNotice: String? = null
 )
 
 data class LogsDialogState(
@@ -303,29 +306,72 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
+  fun setEngineStrategy(strategy: String) {
+    _buildUiState.value = _buildUiState.value.copy(engineStrategy = strategy)
+    prefs.saveEngineStrategy(strategy)
+
+    // Re-run compatibility engine on currently selected project if present
+    val analysis = _buildUiState.value.projectAnalysis
+    if (analysis != null) {
+      val (adaptedFiles, compatAnalysis) = com.example.engine.CompatibilityEngine.inspectAndAdapt(analysis.files, strategy)
+      val updatedAnalysis = analysis.copy(files = adaptedFiles)
+      _buildUiState.value = _buildUiState.value.copy(
+        projectAnalysis = updatedAnalysis,
+        compatibilityAnalysis = compatAnalysis
+      )
+    }
+  }
+
   fun analyzeZipUri(uri: Uri) {
     viewModelScope.launch {
-      _buildUiState.value = _buildUiState.value.copy(isAnalyzing = true, errorMessage = null)
+      _buildUiState.value = _buildUiState.value.copy(isAnalyzing = true, errorMessage = null, missingRequiredNotice = null)
       val context = getApplication<Application>()
       val analysis = ZipProjectParser.analyzeAndExtractZip(context, uri)
 
+      if (analysis.error != null && !analysis.isValidAndroidProject) {
+        _buildUiState.value = _buildUiState.value.copy(
+          isAnalyzing = false,
+          projectAnalysis = analysis,
+          projectName = analysis.detectedProjectName,
+          errorMessage = analysis.error
+        )
+        return@launch
+      }
+
+      val missingNotice = if (analysis.missingRequiredConfigs.contains("google-services.json")) {
+        "Configuração obrigatória ausente: Este projeto utiliza Firebase / Google Services, mas o arquivo 'google-services.json' não foi encontrado no ZIP."
+      } else null
+
+      val strategy = prefs.engineStrategy.value
+      val (adaptedFiles, compatAnalysis) = com.example.engine.CompatibilityEngine.inspectAndAdapt(analysis.files, strategy)
+      val updatedAnalysis = analysis.copy(files = adaptedFiles)
+
       _buildUiState.value = _buildUiState.value.copy(
         isAnalyzing = false,
-        projectAnalysis = analysis,
-        projectName = analysis.detectedProjectName,
-        errorMessage = analysis.error
+        projectAnalysis = updatedAnalysis,
+        compatibilityAnalysis = compatAnalysis,
+        projectName = updatedAnalysis.detectedProjectName,
+        engineStrategy = strategy,
+        errorMessage = analysis.error,
+        missingRequiredNotice = missingNotice
       )
     }
   }
 
   fun loadSampleProject() {
-    _buildUiState.value = _buildUiState.value.copy(isAnalyzing = true, errorMessage = null)
+    _buildUiState.value = _buildUiState.value.copy(isAnalyzing = true, errorMessage = null, missingRequiredNotice = null)
     val analysis = SampleProjectGenerator.generateSampleProject()
+    val strategy = prefs.engineStrategy.value
+    val (adaptedFiles, compatAnalysis) = com.example.engine.CompatibilityEngine.inspectAndAdapt(analysis.files, strategy)
+    val updatedAnalysis = analysis.copy(files = adaptedFiles)
+
     _buildUiState.value = _buildUiState.value.copy(
       isAnalyzing = false,
-      projectAnalysis = analysis,
-      projectName = analysis.detectedProjectName,
-      statusMessage = "Projeto de exemplo gerado com sucesso! Pronto para compilar."
+      projectAnalysis = updatedAnalysis,
+      compatibilityAnalysis = compatAnalysis,
+      projectName = updatedAnalysis.detectedProjectName,
+      engineStrategy = strategy,
+      statusMessage = "Projeto de exemplo Jetpack Compose gerado com sucesso! Pronto para compilar."
     )
   }
 
@@ -336,9 +382,11 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
   fun clearSelectedProject() {
     _buildUiState.value = _buildUiState.value.copy(
       projectAnalysis = null,
+      compatibilityAnalysis = null,
       projectName = "",
       statusMessage = null,
       errorMessage = null,
+      missingRequiredNotice = null,
       currentProgress = null
     )
   }
@@ -354,6 +402,14 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
 
     val analysis = _buildUiState.value.projectAnalysis ?: run {
       _buildUiState.value = _buildUiState.value.copy(errorMessage = "Nenhum projeto ZIP selecionado.")
+      return
+    }
+
+    // Regra de segurança: Se google-services.json for exigido mas não fornecido, interromper e orientar o usuário
+    if (analysis.missingRequiredConfigs.contains("google-services.json")) {
+      _buildUiState.value = _buildUiState.value.copy(
+        errorMessage = "Compilação bloqueada: O arquivo 'google-services.json' é obrigatório para este projeto. O Studio APK não utiliza arquivos fictícios nem mascara erros."
+      )
       return
     }
 
@@ -475,10 +531,26 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
                     }
                   }
 
+                  var buildErrorMessage = build.errorMessage
+                  if (isFinished && run.conclusion == "failure" && build.errorMessage.isNullOrBlank()) {
+                    val jobsResult = repo.getRunJobs(build.repoFullName, build.runId)
+                    val firstFailedJob = jobsResult.getOrNull()?.firstOrNull { it.conclusion == "failure" }
+                    if (firstFailedJob != null) {
+                      val logResult = repo.getJobLogs(build.repoFullName, firstFailedJob.id)
+                      if (logResult.isSuccess) {
+                        buildErrorMessage = diagnoseBuildError(logResult.getOrNull())
+                      }
+                    }
+                    if (buildErrorMessage.isNullOrBlank()) {
+                      buildErrorMessage = "Compilação falhou no GitHub Actions. Consulte os logs detalhados para o rastreamento do erro."
+                    }
+                  }
+
                   val updated = build.copy(
                     status = run.status ?: build.status,
                     conclusion = run.conclusion,
                     runUrl = run.htmlUrl ?: build.runUrl,
+                    errorMessage = buildErrorMessage ?: build.errorMessage,
                     artifactName = artifactName ?: build.artifactName,
                     artifactId = artifactId ?: build.artifactId,
                     artifactDownloadUrl = artifactUrl ?: build.artifactDownloadUrl,
@@ -507,6 +579,40 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
         }
         delay(6000)
       }
+    }
+  }
+
+  fun diagnoseBuildError(logs: String?): String {
+    if (logs.isNullOrBlank()) return "Falha na compilação do Gradle."
+    return when {
+      logs.contains("google-services.json is missing", ignoreCase = true) ||
+      logs.contains("File google-services.json is missing", ignoreCase = true) ->
+        "Configuração Ausente: O arquivo 'google-services.json' é obrigatório para projetos com Firebase e não foi fornecido."
+
+      logs.contains("Unsupported class file major version", ignoreCase = true) ||
+      logs.contains("compiled by a more recent version of the Java Runtime", ignoreCase = true) ->
+        "Incompatibilidade Java: A versão do Java exigida pelo projeto ou dependências é incompatível com o compilador em execução."
+
+      logs.contains("Could not find", ignoreCase = true) && logs.contains("Searched in the following locations", ignoreCase = true) ->
+        "Dependência Inexistente: O Gradle não conseguiu localizar uma ou mais bibliotecas nos repositórios Maven configurados."
+
+      logs.contains("Namespace not specified", ignoreCase = true) ->
+        "Namespace Ausente: O Android Gradle Plugin 8+ exige que a propriedade 'namespace' seja configurada no build.gradle."
+
+      logs.contains("Unresolved reference", ignoreCase = true) ->
+        "Erro de Sintaxe / Referência: O código Kotlin contém referências não resolvidas ou incompatibilidade de API."
+
+      logs.contains("AAPT: error:", ignoreCase = true) || logs.contains("Android resource linking failed", ignoreCase = true) ->
+        "Erro de Recursos (AAPT): Conflito de atributos ou recurso XML corrompido em res/."
+
+      logs.contains("SigningConfig", ignoreCase = true) || logs.contains("Keystore file", ignoreCase = true) ->
+        "Erro de Assinatura: Configuração de keystore inválida ou arquivo de chaves inacessível no build.gradle."
+
+      logs.contains("Out of memory", ignoreCase = true) || logs.contains("Java heap space", ignoreCase = true) ->
+        "Memória Insuficiente: O compilador do Gradle excedeu o limite de heap alocado na JVM."
+
+      else ->
+        "Falha na compilação do Gradle. Abra os logs detalhados para visualizar o rastreamento do erro."
     }
   }
 
@@ -610,7 +716,7 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
           artifactId = targetArtifactId,
           artifactUrl = targetArtifactUrl,
           destinationDir = destDir,
-          preferredName = "$baseName-release"
+          preferredName = "$baseName-${build.buildVariant.ifBlank { "release" }}"
         )
 
         if (downloadResult.isSuccess) {

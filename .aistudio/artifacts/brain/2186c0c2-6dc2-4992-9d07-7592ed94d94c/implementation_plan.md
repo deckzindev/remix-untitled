@@ -1,158 +1,150 @@
-# Studio APK - Robust Android Cloud Builder Architecture
+# Studio APK - Reestruturação e Motor Inteligente de Compilação
 
-A comprehensive plan to eliminate upload freezes, fix GitHub API authentication and S3 artifact download failures, optimize CI compilation workflows, and elevate Studio APK into a professional, resilient Android build tool.
+Um plano definitivo e integral para auditar, corrigir e evoluir o Studio APK em uma ferramenta profissional de compilação Android em nuvem, eliminando execuções duplicadas, garantindo fidelidade estrita de variantes (Release vs Debug), protegendo o token com o Android KeyStore e introduzindo um Motor Inteligente de Compatibilidade e Auto-Correção.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following decisions have been confirmed through user feedback and form the foundation of this plan:
-> - **Upload Architecture**: Parallel batched blob upload with concurrency rate limiter (4 concurrent workers) and automatic default branch CI workflow synchronization.
-> - **Build Variants & Signing**: Dual support for Release and Debug variants with automated keystore generation and self-signed APK outputs.
-> - **Monitoring & Logs**: Live visual multi-phase step progress tracking paired with an interactive, filterable log viewer.
+> Decisões confirmadas pelo usuário para guiar a implementação:
+> - **Estratégia Padrão do Motor**: Modo Compatibilidade por padrão (preservar as configurações originais do projeto, aplicando apenas intervenções mínimas e comprovadamente seguras para viabilizar a compilação).
+> - **Ciclos de Auto-Correção**: Limite de até 3 tentativas automáticas de correção por solicitação de compilação, com diff registrado e reversão de regressões.
+> - **Configurações Obrigatórias Ausentes (ex: `google-services.json`)**: Interromper a compilação de forma controlada e solicitar o arquivo ao usuário — nunca gerar arquivos fictícios com pacotes genéricos.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Auditoria Completa do Projeto Existente
 
-### What It Does
-Studio APK transforms any mobile device into a cloud-based Android compilation station. Users import or generate an Android project (ZIP archive), configure build parameters, push the codebase to a dedicated or personal GitHub repository, compile real signed APKs using GitHub Actions cloud runners, stream compilation logs in real time, and download and install the resulting APK directly onto their device.
+A investigação detalhada do código-fonte confirmou os 10 problemas críticos levantados:
 
-### Target Audience & Persona
-Mobile and Android developers, students, and hobbyists who need to compile Android Gradle projects into APKs on the go without requiring a high-powered desktop workstation or local Android Studio installation.
-
-### Key Value Delivered
-- **Zero-Freeze Code Transmission**: Batched asynchronous upload prevents API timeouts and secondary rate limits.
-- **Reliable CI Workflow Lifecycle**: Automated repository initialization and default branch workflow syncing ensure GitHub Actions always triggers immediately.
-- **Flawless Artifact Retrieval**: Fixes the S3 redirect authorization bug to ensure APK downloads complete 100% of the time.
-- **Transparent Build Telemetry**: Real-time progress, live job steps, and searchable build logs provide complete visibility into compilation.
-
----
-
-## 2. User Experience & Visual Design
-
-### Key User Flows
-
-1. **Setup & Verification**:
-   - User inputs GitHub Personal Access Token (PAT).
-   - Instant token validation with user avatar, name, and repository picker.
-   - One-tap button to automatically configure the dedicated compilation repository (`android-compiler-runner`) with the required CI workflow on the default branch.
-
-2. **Project Selection & Pre-Flight Validation**:
-   - User picks an Android project ZIP or generates a sample Jetpack Compose project.
-   - Comprehensive pre-flight check validates Gradle configuration, module structure, and estimates transfer size.
-   - Clear project summary card displaying module count, detected build variants, and total files to upload.
-
-3. **Execution & Live Progress Tracking**:
-   - Single tap on "Enviar e Compilar APK".
-   - Dynamic multi-step progress bar showing active phase:
-     1. Project sanitization & filtering (stripping build cache/temp files).
-     2. Batched blob transmission (e.g., "Enviando arquivos: 42/180").
-     3. Git Tree & Commit creation.
-     4. Branch publication & CI runner dispatch.
-     5. GitHub Actions live job polling.
-   - Auto-navigation to the compilation monitor with real-time runner status.
-
-4. **Log Inspection & Troubleshooting**:
-   - Interactive modal displaying current step execution (`setup-java`, `setup-gradle`, `compileReleaseApk`).
-   - Terminal-style dark console viewer with text search, auto-scroll, and error highlighting.
-
-5. **Artifact Download & Local Installation**:
-   - Once compilation finishes, the card shows a prominent "Instalar APK" or "Baixar APK" button.
-   - Clean download directly to app storage with progress indication.
-   - Automated invocation of Android `FileProvider` package installer with permission guidance for unknown sources.
-
-### Visual Identity & Theme
-- **Theme Direction**: Premium Developer Dark aesthetic (obsidian background `#0B0F19`, slate cards `#161E2E`, vibrant electric blue accent `#3B82F6`, neon emerald success `#10B981`, and amber warning `#F59E0B`).
-- **Typography**: Clean, monospace typography for logs and code hashes, modern high-legibility sans-serif for UI labels and metrics.
-- **Feedback & Motion**: Subtle pulsing glow during active builds, smooth progress bars, and staggered entry animations for build history items.
+| ID | Arquivo Afetado | Causa Raiz Identificada | Gravidade | Solução Arquitetural | Teste de Validação |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **P1** | `WorkflowTemplate.kt` (linhas 116-123) | Fallback automático silencioso para `assembleDebug` quando `assembleRelease` falha. | **CRÍTICA** | Remover qualquer fallback silencioso. Se Release falhar, registrar erro legítimo e preservar logs exatos. | Testar build Release forçando falha e comprovar ausência de execução Debug. |
+| **P2** | `GitHubRepository.kt` (linhas 270-305) | Disparo duplo via `dispatchWorkflow` quando polling inicial da API não encontra a execução do push imediatamente. | **ALTA** | Idempotência estrita: usar commit SHA único, chave de idempotência e reconciliação sem disparar duplicatas. | Simular atraso na API e verificar que apenas 1 workflow run é iniciado. |
+| **P3** | `ZipProjectParser.kt` (linha 125) | Condição `if (bytes.size <= 15MB)` descarta arquivos grandes silenciosamente sem alertar o usuário. | **ALTA** | Registrar violação de tamanho explicitamente, listar o nome do arquivo que excedeu o limite e interromper com diagnóstico claro. | Testar ZIP com arquivo >15MB e verificar interrupção com mensagem explicativa. |
+| **P4** | `WorkflowTemplate.kt` (linhas 72-76) | Criação de `google-services.json` fictício com package `com.example` mascarando ausência do arquivo real. | **ALTA** | Eliminar injeção de JSON falso no CI. Se o plugin Google Services estiver ativo e o JSON faltar, acusar falta de configuração. | Testar projeto com plugin Google Services sem JSON e validar parada controlada. |
+| **P5** | `PreferencesManager.kt` (linha 11) | Token do GitHub gravado em plaintext em SharedPreferences padrão (`gitbuilder_prefs`). | **CRÍTICA** | Criar `CryptoManager` com criptografia AES-256-GCM backed pelo hardware Android KeyStore (`AndroidKeyStore`). | Validar que o token armazenado em disco é criptografado e ilegível sem chave privada. |
+| **P6** | `ZipProjectParser.kt` | Ausência de limites globais para ZIP bombs, caminhos `../` (zip-slip traversal), contagem de arquivos e profundidade. | **ALTA** | Implementar `SafeZipExtractor` com validação de canonical path contra path traversal, limite uncompressed de 250MB e contagem de até 1500 arquivos. | Testar ZIP malicioso com `../` e arquivos recursivos para validar bloqueio seguro. |
+| **P7** | Novo módulo | Inexistência de analisador de matriz de compatibilidade (AGP, Gradle, Java, compileSdk, minSdk). | **ALTA** | Construir `CompatibilityEngine` com matriz oficial de versões (AGP 7.x-8.x, Java 8/11/17/21, Gradle 6.x-8.x). | Analisar projetos legados (ex: Java 8 / AGP 7.2) e comprovar detecção correta. |
+| **P8** | `WorkflowTemplate.kt` / `ZipProjectParser.kt` | Se `gradlew` ou `gradle-wrapper.properties` faltar, o projeto pode falhar sem diagnóstico da versão necessária. | **MÉDIA** | `CompatibilityEngine` detecta a versão ideal do Gradle e provisiona o wrapper correto de forma auditável e transparente. | Testar projeto sem pasta `gradle/wrapper/` e verificar injeção do wrapper apropriado. |
+| **P9** | `BuilderViewModel.kt` | Algumas rotinas usavam variantes fixas ou nomeavam artefatos como release independentemente da seleção. | **MÉDIA** | Sincronizar parâmetro de variante ponta a ponta: requisição, build task, artefato gerado e identificação no banco. | Testar seleção explícita de Debug e comprovar geração e identificação de Debug APK. |
+| **P10** | `app/build.gradle.kts` / `metadata.json` | `metadata.json` e recursos de nomes precisam estar estritamente alinhados e sem vazamento de segredos. | **BAIXA** | Alinhamento e auditoria preventiva em `.env.example`, `strings.xml`, `AndroidManifest.xml` e ProGuard. | Verificar build release e ausência de tokens em BuildConfig/logs. |
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 2. Visão Geral e Conceito do Produto
 
-### Decision 1: Concurrency-Limited Parallel Blob Uploading
-- **Chosen Approach**: Use Kotlin Coroutines with a `Semaphore(permits = 4)` to upload Git blobs in parallel batches with adaptive retry.
-- **Why**: Sequential uploads take 3-6 minutes for medium projects and trigger GitHub secondary rate limits. Concurrency of 4 reduces upload time to under 20-30 seconds while remaining comfortably within GitHub API rate limits.
-- **Alternative Considered**: Uploading via a single large archive to GitHub Releases or commit endpoint. Bypassing Git trees prevents GitHub Actions from running standard checkouts.
+### O Que É o Studio APK Evoluído
+Uma estação móvel de engenharia Android que permite a desenvolvedores e estudantes transformar código-fonte em pacotes APK reais diretamente do smartphone. O aplicativo inspeciona o projeto ZIP com regras de segurança rígidas, avalia a compatibilidade de ferramentas de compilação, propõe ou aplica correções não-destrutivas (em cópia de trabalho isolada) e orquestra a compilação no GitHub Actions com rastreabilidade absoluta e idempotência.
 
-### Decision 2: OkHttp Host-Aware Authorization Interceptor
-- **Chosen Approach**: Modify `GitHubApiClient` interceptor so the `Authorization: Bearer <token>` header is **only** attached when `request.url.host` equals `api.github.com` or `github.com`.
-- **Why**: GitHub artifact download endpoints return an HTTP 302 redirect to AWS S3 pre-signed URLs. When OkHttp forwards the Authorization header to AWS S3, S3 rejects the request with HTTP 400 because pre-signed URLs cannot be combined with Bearer auth headers.
-- **Alternative Considered**: Disabling redirects in OkHttp and manually handling the redirect URL in a separate client. Host checking in the interceptor is cleaner, safer, and handles all redirects automatically.
-
-### Decision 3: Default-Branch Workflow Synchronization
-- **Chosen Approach**: Always verify and install `.github/workflows/android-compile.yml` on the repository's default branch (`main`) before creating build branches.
-- **Why**: GitHub Actions push-triggers on `build/**` branches are only evaluated if the workflow file is present in the repository's default branch. If committed only to a feature branch, GitHub Actions will refuse to run.
-- **Alternative Considered**: Running strictly on `main` branch. Using isolated `build/<project>-<timestamp>` branches prevents dirty states and allows concurrent builds without commit collisions.
+### Modos de Operação do Motor de Compatibilidade
+1. **Modo Compatibilidade (Padrão Recomendado)**: Mantém o código e scripts de build originais, ajustando somente variáveis de ambiente mínimas (ex: JVM version, JDK 17 vs 11, licenças SDK) necessárias para a execução com as versões originais do projeto.
+2. **Modo Modernização**: Atualiza controladamente o AGP, Gradle Wrapper e plugins obsoletos para padrões modernos estáveis, registrando diffs das alterações.
+3. **Modo Recuperação**: Disparado após falhas de compilação, diagnostica a causa raiz no log do Gradle, propõe correção isolada e reverte automaticamente em caso de regressão.
 
 ---
 
-## 4. Technical Architecture & Data Strategy
+## 3. Experiência do Usuário e Interface
 
-### System Component Architecture
-
+### Fluxo Ponta a Ponta
 ```
-┌────────────────────────────────────────────────────────┐
-│                   Studio APK App (M3)                  │
-├─────────────────┬───────────────────┬──────────────────┤
-│  Build Screen   │  History Screen   │ Settings Screen  │
-└────────┬────────┴─────────┬─────────┴────────┬─────────┘
-         │                  │                  │
-         ▼                  ▼                  ▼
-┌────────────────────────────────────────────────────────┐
-│                   BuilderViewModel                     │
-├────────────────────────────────────────────────────────┤
-│  • Pre-flight Sanitizer     • Build State Machine      │
-│  • Parallel Transfer Pool   • Realtime Run Poller      │
-└────────┬──────────────────┬──────────────────┬─────────┘
-         │                  │                  │
-         ▼                  ▼                  ▼
-┌──────────────────┐┌──────────────────┐┌────────────────┐
-│   AppDatabase    ││ GitHubRepository ││   ApkManager   │
-│   (Room / DAO)   ││  (Retrofit/API)  ││ (FileProvider) │
-│ • Local Builds   ││ • Blobs/Trees    ││ • Safe Storage │
-│ • Artifact State ││ • Runs & Logs    ││ • OS Installer │
-└──────────────────┘└────────┬─────────┘└────────────────┘
-                             │
-                             ▼
-              ┌─────────────────────────────┐
-              │     GitHub REST API / CI    │
-              │ • Git Data (Blobs/Trees)    │
-              │ • GitHub Actions Runners    │
-              │ • AWS S3 Artifact Storage   │
-              └─────────────────────────────┘
+┌─────────────────┐     ┌───────────────────┐     ┌───────────────────┐
+│ 1. Seleção ZIP  │ ──► │ 2. Sanitização &  │ ──► │ 3. Relatório de   │
+│ (ou Projeto Ex) │     │ Validação Segura  │     │ Compatibilidade   │
+└─────────────────┘     └───────────────────┘     └─────────┬─────────┘
+                                                            │
+┌─────────────────┐     ┌───────────────────┐               ▼
+│ 6. Download &   │ ◄── │ 5. Monitoramento  │ ◄── ┌───────────────────┐
+│ Instalação APK  │     │ Real Idempotente  │     │ 4. Envio Paralelo │
+└─────────────────┘     └───────────────────┘     │ & Disparo Único   │
+                                                  └───────────────────┘
 ```
 
-### Critical Problem Diagnoses & Proposed Fixes
-
-| Problem Identified | Root Cause | Architectural Solution |
-| :--- | :--- | :--- |
-| **Upload Stuck / Freezing** | Sequential single-thread blob loop + memory bloat + secondary rate limits | Parallel asynchronous coroutines (`Semaphore(4)`), memory-efficient streaming, smart exclusion of `.gradle/`, `.git/`, and binary build outputs. |
-| **Workflow Never Triggers** | Pushing orphan branch without workflow on `main` branch | Enforce default branch workflow installation during repo init/pre-flight; ensure branch commit points to valid base tree. |
-| **Poller Times Out / Gets Stuck** | Short 16-second window for runner start; null `runId` never re-checked | Extended discovery window (up to 60s), persistent orphan recovery in polling worker that matches head commit SHA. |
-| **APK Download Fails (HTTP 400)** | OkHttp forwards Bearer token on redirect to AWS S3 storage | Host-aware Auth interceptor that strips authorization headers on redirect to third-party CDNs/S3. |
-| **APK Parsing / Corrupt Archive** | Artifact is a ZIP containing the APK, extracted naively | Robust multi-entry streaming `ZipInputStream` parser that locates `.apk` in nested artifact folders and validates checksums. |
-
-### Data Model & Persistence
-- **Room Database (`AppDatabase`)**:
-  - `ProjectBuildEntity`: Tracks `id`, `projectName`, `repoFullName`, `branchName`, `commitSha`, `runId`, `buildVariant`, `gradleTask`, `status` (`pending`, `uploading`, `queued`, `in_progress`, `completed`, `failed`), `conclusion`, `artifactDownloadUrl`, `localApkPath`, `errorMessage`, `startedAt`, `completedAt`.
-  - Continuous reactive observation via `Flow<List<ProjectBuildEntity>>`.
+1. **Seleção & Pre-flight**: Usuário seleciona o ZIP. O extrator seguro valida hashes, profundidade e ausência de zip-slip.
+2. **Diagnóstico Imediato**: Exibição da estrutura detectada: módulos, Gradle, AGP, Java target, plugins e dependências. Se faltar `google-services.json` ou chaves privadas, um alerta bloqueante orienta o envio do arquivo.
+3. **Seleção de Variante Consciente**: Alternador explícito entre **Release (Assinado)** e **Debug**.
+4. **Execução Transparente**: Barra de progresso com porcentagem determinística durante o envio em lotes paralelos (`Semaphore(4)`).
+5. **Acompanhamento Remoto Fiel**: Sincronização direta com a API do GitHub Actions, exibindo passos reais (`setup-java`, `assembleRelease`, `upload-artifact`).
+6. **Entrega de Logs & Diagnóstico**: Se houver falha, botão para ver e copiar os logs completos com identificação do erro do Gradle (ex: sintaxe, dependência não resolvida).
 
 ---
 
-## 5. Implementation Sequence
+## 4. Arquitetura Técnica e Estratégia de Dados
 
-1. **Network Layer Fortification**:
-   - Update `GitHubApiClient.kt` with host-aware auth interceptor and optimized timeouts.
-   - Enhance `GitHubApiService.kt` and `GitHubModels.kt` to support commit parent references and tree caching.
-2. **Parallel Code Transfer Engine**:
-   - Refactor `GitHubRepository.kt` to implement batched blob uploads with `Semaphore(4)` and progressive chunked callbacks.
-   - Refactor `ZipProjectParser.kt` to strip superfluous build directories, caches, and large binary artifacts.
-3. **Workflow & Branch Dispatch Optimization**:
-   - Update `WorkflowTemplate.kt` with modern Gradle daemon optimizations, SDK license automation, and dual-variant artifact capture.
-   - Implement resilient runner matching and commit SHA linking.
-4. **Resilient APK Downloader & Installer**:
-   - Implement streaming artifact extraction with retry and direct FileProvider package installation.
-5. **UI & Telemetry Overhaul**:
-   - Revamp `BuildScreen.kt` with real-time transfer progress and live status.
-   - Polish `HistoryScreen.kt` and `LogsViewerDialog.kt` with log filtering, live status chips, and direct installer triggers.
+### Diagrama de Componentes do Sistema
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        STUDIO APK - CORE ENGINE                        │
+├──────────────────────────┬──────────────────────────┬──────────────────┤
+│        UI LAYER          │      SECURITY LAYER      │   LOCAL STORAGE  │
+│  • BuildScreen           │  • CryptoManager         │  • AppDatabase   │
+│  • HistoryScreen         │    (KeyStore AES-256)    │    (Room DAO)    │
+│  • SettingsScreen        │  • SafeZipExtractor      │  • Encrypted     │
+│  • LogsViewerDialog      │    (ZipSlip & Bombs)     │    Preferences   │
+└────────────┬─────────────┴────────────┬─────────────┴────────┬─────────┘
+             │                          │                      │
+             ▼                          ▼                      ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                          BuilderViewModel                              │
+│  • Coordenação do Ciclo de Build       • Gestão de Estado Idempotente  │
+│  • Despacho do Motor de Compatibilidade• Sincronização em Background   │
+└────────────┬─────────────────────────────────────────────────┬─────────┘
+             │                                                 │
+             ▼                                                 ▼
+┌─────────────────────────────┐               ┌──────────────────────────┐
+│     CompatibilityEngine     │               │     GitHubRepository     │
+│ • Detect AGP/Gradle/Java    │               │ • Upload Paralelo Seguro │
+│ • Compatibility Matrix      │               │ • Idempotent Run Poller  │
+│ • Safe Patch & Diff Logger  │               │ • S3 Stream APK Download │
+└─────────────────────────────┘               └─────────────┬────────────┘
+                                                            │
+                                                            ▼
+                                              ┌──────────────────────────┐
+                                              │   GitHub Actions CI      │
+                                              │ • JDK 17/11 Matrix       │
+                                              │ • assembleRelease Único  │
+                                              │ • Validated Artifact Zip │
+                                              └──────────────────────────┘
+```
+
+### Detalhamento das Classes Chave a Criar / Refatorar
+
+1. **`com.example.security.CryptoManager`**:
+   - Gera e armazena chave AES-256 no `AndroidKeyStore`.
+   - Criptografia autenticada com AES/GCM/NoPadding.
+   - Migração transparente dos tokens existentes para o formato cifrado.
+
+2. **`com.example.util.SafeZipExtractor`**:
+   - Limite máximo de tamanho descompactado: 250 MB.
+   - Limite de arquivos: 1.500 entradas.
+   - Limite de profundidade: 15 diretórios.
+   - Detecção de Path Traversal (`entry.name.contains("..")` ou canonical path fora da raiz temporária).
+   - Aviso explícito de arquivos ignorados com relatório completo (nunca descarte silencioso).
+
+3. **`com.example.engine.CompatibilityEngine`**:
+   - Mapeamento: AGP <-> Gradle <-> Versão Java compatível.
+   - Inspeção de arquivos `build.gradle`, `build.gradle.kts`, `settings.gradle`, `gradle-wrapper.properties`.
+   - Detecção de requisitos bloqueantes (`google-services.json`, chaves de assinatura privadas).
+   - Geração de diff e registro histórico de alterações aplicadas.
+
+4. **`com.example.data.workflow.WorkflowTemplate`**:
+   - Eliminação de qualquer fallback silencioso para `assembleDebug`.
+   - Remoção de injeção de JSON falso do Firebase.
+   - Captura estrita da variante solicitada e validação de existência física do `.apk` antes de declarar sucesso no job.
+
+5. **`com.example.data.remote.GitHubRepository`**:
+   - Associação de cada compilação com um UUID único (`client_request_id`) incluído no commit e mensagem do build para idempotência.
+   - Busca de execuções existentes antes de qualquer ação.
+   - Eliminação de duplicatas de dispatch.
+
+---
+
+## 5. Sequência de Implementação
+
+1. **Segurança de Dados**: Implementar `CryptoManager` e integrar ao `PreferencesManager`.
+2. **Sanitização de Arquivos**: Implementar `SafeZipExtractor` com validação de zip bombs e traversal.
+3. **Motor de Compatibilidade**: Construir `CompatibilityEngine` com detecção de versões e matriz AGP/Gradle/Java.
+4. **Purificação do Workflow CI**: Atualizar `WorkflowTemplate.kt` removendo fallbacks ilegítimos e arquivos fictícios.
+5. **Idempotência & Integração GitHub**: Atualizar `GitHubRepository.kt` com controle de execuções únicas e reconciliação.
+6. **Interface & Feedback do Usuário**: Atualizar `BuildScreen.kt` e `SettingsScreen.kt` para expor modos de compatibilidade e alertas de arquivos ausentes.
+7. **Verificação & Testes**: Executar testes unitários e `compile_applet`.

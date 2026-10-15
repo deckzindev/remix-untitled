@@ -287,12 +287,12 @@ class GitHubRepository(private val apiService: GitHubApiService) {
         throw Exception("Falha ao criar branch $branchName: HTTP ${refResp.code()}")
       }
 
-      // 9. Aguardar inicialização do runner no GitHub Actions (até 30s)
+      // 9. Aguardar inicialização do runner no GitHub Actions (até 40s)
       onProgress(BuildStepProgress.WaitingForRunner)
       var runId: Long? = null
       var runUrl: String? = null
 
-      for (attempt in 1..15) {
+      for (attempt in 1..20) {
         kotlinx.coroutines.delay(2000)
         val runsResp = apiService.getWorkflowRuns(owner, repo, perPage = 10, branch = branchName)
         if (runsResp.isSuccessful) {
@@ -307,35 +307,7 @@ class GitHubRepository(private val apiService: GitHubApiService) {
         }
       }
 
-      // Fallback: se não iniciou automaticamente em 30s, aciona via workflow_dispatch
-      if (runId == null) {
-        try {
-          apiService.dispatchWorkflow(
-            owner = owner,
-            repo = repo,
-            workflowId = WorkflowTemplate.WORKFLOW_FILE_NAME,
-            payload = com.example.data.model.WorkflowDispatchPayload(
-              ref = branchName,
-              inputs = mapOf("build_variant" to buildVariant)
-            )
-          )
-          for (attempt in 1..6) {
-            kotlinx.coroutines.delay(2000)
-            val runsResp = apiService.getWorkflowRuns(owner, repo, perPage = 10, branch = branchName)
-            if (runsResp.isSuccessful) {
-              val runs = runsResp.body()?.workflowRuns.orEmpty()
-              val matched = runs.firstOrNull { it.headSha == commitSha || it.headBranch == branchName }
-              if (matched != null) {
-                runId = matched.id
-                runUrl = matched.htmlUrl
-                onProgress(BuildStepProgress.WorkflowStarted(matched.id, matched.htmlUrl ?: ""))
-                break
-              }
-            }
-          }
-        } catch (_: Exception) {}
-      }
-
+      // Se ainda não apareceu na API devido a fila do GitHub Actions, o polling em segundo plano reconciliará pelo commit SHA sem disparar execuções duplicadas!
       Result.success(Triple(branchName, runId, commitSha))
     } catch (e: Exception) {
       Result.failure(e)

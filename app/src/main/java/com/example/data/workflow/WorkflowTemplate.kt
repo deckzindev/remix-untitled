@@ -22,19 +22,23 @@ on:
         options:
           - debug
           - release
-      gradle_task:
-        description: 'Tarefa do Gradle a executar'
+      client_request_id:
+        description: 'Identificador único da solicitação para idempotência'
         required: false
         default: ''
 
+concurrency:
+  group: studio-build-${'$'}{{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
-    name: Build Android APK
+    name: Compilar APK Android
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
 
     steps:
-      - name: 📥 Clonar Código-Fonte
+      - name: 📥 Clonar Código-Fonte Enviado
         uses: actions/checkout@v4
 
       - name: ☕ Configurar Java JDK 17
@@ -47,11 +51,11 @@ jobs:
       - name: 🐘 Configurar Ambiente Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 🔑 Configurar Keystores e Variáveis de Ambiente
+      - name: 🔑 Configurar Keystore e Variáveis de Compilação
         run: |
-          echo "=== 1. Gerando debug.keystore e my-upload-key.jks ==="
-          keytool -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 10000 -keyalg RSA -keysize 2048 || true
-          keytool -genkeypair -alias upload -keypass android -keystore my-upload-key.jks -storepass android -dname "CN=Android Upload,O=Android,C=US" -validity 10000 -keyalg RSA -keysize 2048 || true
+          echo "=== 1. Gerando chaves de assinatura autônomas ==="
+          keytool -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=StudioAPK,C=US" -validity 10000 -keyalg RSA -keysize 2048 || true
+          keytool -genkeypair -alias upload -keypass android -keystore my-upload-key.jks -storepass android -dname "CN=Android Release,O=StudioAPK,C=US" -validity 10000 -keyalg RSA -keysize 2048 || true
           mkdir -p ~/.android
           cp debug.keystore ~/.android/debug.keystore || true
           mkdir -p app
@@ -69,83 +73,72 @@ jobs:
           echo "=== 3. Aceitando licenças do Android SDK ==="
           yes | sdkmanager --licenses || true
 
-          echo "=== 4. Configurando google-services.json caso ausente ==="
-          if [ ! -f "app/google-services.json" ] && [ ! -f "google-services.json" ]; then
-            echo '{"project_info":{"project_number":"123456789","project_id":"dummy-build-ci","storage_bucket":"dummy.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789:android:dummy","android_client_info":{"package_name":"com.example"}},"api_key":[{"current_key":"dummy_key"}]}]}' > app/google-services.json
-          fi
-
-          echo "=== 5. Otimizando gradle.properties para ambiente CI ==="
+          echo "=== 4. Otimizando gradle.properties para ambiente CI ==="
           echo "org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
           echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.builder.sdkDownload=true" >> gradle.properties
 
-      - name: 🛠️ Garantir Gradle Wrapper Executável
+      - name: 🛠️ Garantir Permissões do Gradle Wrapper
         run: |
           if [ ! -f "./gradlew" ]; then
-            echo "gradlew ausente no repositório. Inicializando wrapper..."
+            echo "Aviso: gradlew não encontrado na raiz. Inicializando wrapper do Gradle..."
             gradle wrapper || true
           fi
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
           fi
 
-      - name: 🔨 Compilar APK do Projeto
+      - name: 🔨 Executar Compilação da Variante Solicitada
         env:
           STORE_PASSWORD: android
           KEY_PASSWORD: android
           KEYSTORE_PATH: ${'$'}{{ github.workspace }}/my-upload-key.jks
         run: |
           BUILD_TYPE="${'$'}{{ github.event.inputs.build_variant || 'release' }}"
-          GRADLE_CMD="${'$'}{{ github.event.inputs.gradle_task || '' }}"
+          echo "=========================================================="
+          echo " Iniciando compilação da variante: [${'$'}BUILD_TYPE]"
+          echo "=========================================================="
 
-          if [ -z "${'$'}GRADLE_CMD" ]; then
-            if [ "${'$'}BUILD_TYPE" = "debug" ]; then
-              GRADLE_CMD="assembleDebug"
-            else
-              GRADLE_CMD="assembleRelease"
-            fi
+          if [ "${'$'}BUILD_TYPE" = "debug" ]; then
+            GRADLE_TASK="assembleDebug"
+          else
+            GRADLE_TASK="assembleRelease"
           fi
 
-          echo "Iniciando compilação: ${'$'}GRADLE_CMD (Variante: ${'$'}BUILD_TYPE)"
+          echo "Executando tarefa: ${'$'}GRADLE_TASK"
           export STORE_PASSWORD=android
           export KEY_PASSWORD=android
           export KEYSTORE_PATH="${'$'}GITHUB_WORKSPACE/my-upload-key.jks"
 
-          SUCCESS=0
           if [ -f "./gradlew" ]; then
-            ./gradlew ${'$'}GRADLE_CMD --no-daemon --stacktrace && SUCCESS=1 || true
-            if [ ${'$'}SUCCESS -eq 0 ] && [ "${'$'}GRADLE_CMD" != "assembleDebug" ]; then
-              echo "Aviso: Falha ao compilar com ${'$'}GRADLE_CMD. Tentando fallback seguro para assembleDebug..."
-              ./gradlew assembleDebug --no-daemon --stacktrace && SUCCESS=1 || true
-            fi
-            if [ ${'$'}SUCCESS -eq 0 ]; then
-              echo "Tentando última alternativa: assemble geral..."
-              ./gradlew assemble --no-daemon --stacktrace && SUCCESS=1 || true
-            fi
+            ./gradlew ${'$'}GRADLE_TASK --no-daemon --stacktrace
           else
-            gradle ${'$'}GRADLE_CMD --no-daemon --stacktrace && SUCCESS=1 || true
-            if [ ${'$'}SUCCESS -eq 0 ] && [ "${'$'}GRADLE_CMD" != "assembleDebug" ]; then
-              echo "Aviso: Falha ao compilar com ${'$'}GRADLE_CMD. Tentando fallback seguro para assembleDebug..."
-              gradle assembleDebug --no-daemon --stacktrace && SUCCESS=1 || true
-            fi
-            if [ ${'$'}SUCCESS -eq 0 ]; then
-              echo "Tentando última alternativa: assemble geral..."
-              gradle assemble --no-daemon --stacktrace && SUCCESS=1 || true
-            fi
+            gradle ${'$'}GRADLE_TASK --no-daemon --stacktrace
           fi
 
-          if [ ${'$'}SUCCESS -eq 0 ]; then
-            echo "Erro crítico: Não foi possível compilar nenhum APK."
+      - name: 📦 Localizar e Validar APK da Variante
+        run: |
+          BUILD_TYPE="${'$'}{{ github.event.inputs.build_variant || 'release' }}"
+          mkdir -p output_apks
+
+          echo "Buscando APKs gerados correspondentes a [${'$'}BUILD_TYPE]..."
+          find . -type f -name "*${'$'}{BUILD_TYPE}*.apk" -exec cp {} output_apks/ \;
+
+          # Se não encontrou pelo nome exato da variante, buscar em caminhos padrão de outputs
+          if [ -z "$(ls -A output_apks)" ]; then
+            find . -path "*/build/outputs/apk/*" -type f -name "*.apk" -exec cp {} output_apks/ \;
+          fi
+
+          TOTAL_APKS=$(ls -1 output_apks/*.apk 2>/dev/null | wc -l)
+          if [ "${'$'}TOTAL_APKS" -eq 0 ]; then
+            echo "ERRO CRÍTICO: Nenhum arquivo APK correspondente à variante ${'$'}BUILD_TYPE foi gerado."
             exit 1
           fi
 
-      - name: 📦 Localizar e Empacotar APKs Gerados
-        run: |
-          mkdir -p output_apks
-          find . -name "*.apk" -type f -exec cp {} output_apks/ \;
-          echo "Arquivos APK encontrados:"
+          echo "APKs validados com sucesso:"
           ls -la output_apks/
 
-      - name: 🚀 Publicar Artefato APK para Download
+      - name: 🚀 Publicar Artefato APK
         uses: actions/upload-artifact@v4
         with:
           name: app-compiled-apk

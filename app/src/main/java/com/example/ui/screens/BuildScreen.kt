@@ -21,9 +21,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -45,9 +47,11 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -316,6 +320,8 @@ fun BuildScreen(
       } else {
         // Project selected: details & build configuration
         val analysis = buildState.projectAnalysis!!
+        val compat = buildState.compatibilityAnalysis
+        val hasMissingGoogleServices = analysis.missingRequiredConfigs.contains("google-services.json")
 
         Card(
           colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant),
@@ -383,6 +389,106 @@ fun BuildScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            // Compatibility Engine Diagnostics Bar
+            if (compat != null) {
+              Card(
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().border(1.dp, DarkBorder, RoundedCornerShape(10.dp))
+              ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Build, contentDescription = null, tint = AccentBlueBright, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                      text = "Diagnóstico do Motor de Compatibilidade",
+                      fontWeight = FontWeight.Bold,
+                      fontSize = 12.sp,
+                      color = TextPrimary
+                    )
+                  }
+
+                  Spacer(modifier = Modifier.height(6.dp))
+
+                  Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                  ) {
+                    Text(
+                      text = "AGP: ${compat.detectedAgpVersion ?: "Padrão"} • Gradle: ${compat.detectedGradleVersion ?: "Wrapper"} • JDK: ${compat.recommendedJavaVersion}",
+                      fontSize = 11.sp,
+                      fontFamily = FontFamily.Monospace,
+                      color = TextSecondary
+                    )
+                  }
+
+                  if (compat.proposedModifications.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                      text = "✓ ${compat.proposedModifications.size} ajuste de compatibilidade seguro aplicado (${compat.proposedModifications.first().description})",
+                      fontSize = 11.sp,
+                      color = AccentGreenBright
+                    )
+                  }
+                }
+              }
+
+              Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Strategy Selector
+            Text(
+              text = "Estratégia do Motor:",
+              fontSize = 13.sp,
+              fontWeight = FontWeight.SemiBold,
+              color = TextSecondary
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+              FilterChip(
+                selected = buildState.engineStrategy == "compatibility",
+                onClick = { viewModel.setEngineStrategy("compatibility") },
+                label = { Text("Compatibilidade (Padrão)") },
+                colors = FilterChipDefaults.filterChipColors(
+                  selectedContainerColor = AccentBlueBright.copy(alpha = 0.2f),
+                  selectedLabelColor = AccentBlueBright,
+                  containerColor = DarkSurface,
+                  labelColor = TextMuted
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                  enabled = true,
+                  selected = buildState.engineStrategy == "compatibility",
+                  borderColor = if (buildState.engineStrategy == "compatibility") AccentBlueBright else DarkBorder
+                ),
+                modifier = Modifier.weight(1f)
+              )
+
+              FilterChip(
+                selected = buildState.engineStrategy == "modernization",
+                onClick = { viewModel.setEngineStrategy("modernization") },
+                label = { Text("Modernização") },
+                colors = FilterChipDefaults.filterChipColors(
+                  selectedContainerColor = AccentAmber.copy(alpha = 0.2f),
+                  selectedLabelColor = AccentAmber,
+                  containerColor = DarkSurface,
+                  labelColor = TextMuted
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                  enabled = true,
+                  selected = buildState.engineStrategy == "modernization",
+                  borderColor = if (buildState.engineStrategy == "modernization") AccentAmber else DarkBorder
+                ),
+                modifier = Modifier.weight(1f)
+              )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
             // Build Variant selector (Release vs Debug)
             Text(
               text = "Variante de Compilação:",
@@ -444,6 +550,34 @@ fun BuildScreen(
           }
         }
 
+        // Missing required config alert (google-services.json)
+        if (hasMissingGoogleServices) {
+          Card(
+            colors = CardDefaults.cardColors(containerColor = AccentRed.copy(alpha = 0.15f)),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.fillMaxWidth().border(1.dp, AccentRed.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+          ) {
+            Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.Top) {
+              Icon(Icons.Default.Warning, contentDescription = null, tint = AccentRed, modifier = Modifier.size(22.dp))
+              Spacer(modifier = Modifier.width(10.dp))
+              Column {
+                Text(
+                  text = "Configuração Obrigatória Ausente",
+                  fontWeight = FontWeight.Bold,
+                  fontSize = 13.sp,
+                  color = AccentRed
+                )
+                Text(
+                  text = "O projeto utiliza o plugin do Google Services / Firebase, mas o arquivo 'google-services.json' não foi encontrado. Adicione o arquivo ao ZIP para compilar com segurança (o Studio APK não injeta credenciais falsas).",
+                  fontSize = 12.sp,
+                  color = TextPrimary,
+                  lineHeight = 17.sp
+                )
+              }
+            }
+          }
+        }
+
         // Target repository display
         if (authState.selectedRepo.isNotBlank()) {
           Card(
@@ -467,7 +601,7 @@ fun BuildScreen(
           }
         }
 
-        // Compile Button
+        // Compile Button (enabled only if no blocking missing configs)
         Button(
           onClick = {
             if (authState.token.isBlank()) {
@@ -476,20 +610,24 @@ fun BuildScreen(
               viewModel.startBuild { onNavigateToHistory() }
             }
           },
+          enabled = !hasMissingGoogleServices,
           modifier = Modifier
             .fillMaxWidth()
             .height(54.dp)
             .testTag("start_build_button"),
-          colors = ButtonDefaults.buttonColors(containerColor = AccentGreenBright),
+          colors = ButtonDefaults.buttonColors(
+            containerColor = AccentGreenBright,
+            disabledContainerColor = DarkSurfaceVariant
+          ),
           shape = RoundedCornerShape(12.dp)
         ) {
           Icon(Icons.Default.PlayArrow, contentDescription = null, tint = DarkSurface, modifier = Modifier.size(20.dp))
           Spacer(modifier = Modifier.width(10.dp))
           Text(
-            text = "Enviar e Compilar APK",
-            color = DarkSurface,
+            text = if (hasMissingGoogleServices) "Adicione o google-services.json para Compilar" else "Enviar e Compilar APK",
+            color = if (hasMissingGoogleServices) TextMuted else DarkSurface,
             fontWeight = FontWeight.Bold,
-            fontSize = 15.sp
+            fontSize = 14.sp
           )
         }
       }
